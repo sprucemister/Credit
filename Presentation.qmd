@@ -1,0 +1,481 @@
+---
+title: "Paidy Credit Project Presentation"
+format: html
+editor: source
+warning: false
+---
+
+## Introduction
+
+Multiple models to predict true delinquency will be created. The champion model will be chosen based on scoring primarily and secondarily on interpretability and compute time.
+
+## Packages
+
+```{python}
+# General
+import pandas as pd
+import numpy as np
+import statistics
+
+# Plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Imputing
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+
+# Modeling
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+from sklearn.preprocessing import StandardScaler
+from sklearn.neural_network import MLPRegressor
+from sklearn.linear_model import LogisticRegression
+```
+
+## Data Importing
+
+```{python}
+# Read Data
+df_train = pd.read_csv("data//cs-training.csv")
+df_unseen = pd.read_csv("data//cs-test.csv")
+
+# Combine test and train so that data wrangling steps not duplicated
+df_train['DataType'] = 'Train'
+df_unseen['DataType'] = 'Unseen'
+df = pd.concat([df_train, df_unseen])
+
+# Rename column names with special characters, use PascalCase
+df.rename(columns={df.columns[0]: 'Id'}, inplace=True)
+df.rename(columns={df.columns[4]: 'NumberOfTime30To59DaysPastDueNotWorse'}, inplace=True)
+df.rename(columns={df.columns[10]: 'NumberOfTime60To89DaysPastDueNotWorse'}, inplace=True)
+df.rename(columns={df.columns[3]: 'Age'}, inplace=True)
+```
+
+## EDA - Graphing
+
+```{python}
+# Plot Distributions
+df_eda = df[df['DataType']=='Train']
+for col in df_eda.columns:
+  if col != 'Id' and col != 'DataType':
+    plt.boxplot(df_eda[col].dropna())
+    plt.title(col + ' Max: '+df_eda[col].max().astype('str')+', Min: '+ \
+              df_eda[col].min().astype('str'))
+    plt.show()
+    plt.cla()
+```
+
+## Discussion - EDA Graphing
+
+All distributions looks to have reasonable, non-erroneous distributions as far as can be observed without further business knowledge, so no attempt will be made to fix bad data.
+
+## EDA - Find Missing Data
+
+```{python}
+# Count Nulls
+df_eda.isnull().sum()
+```
+
+Two columns with missing values were found. Medians, means, and distributions for those missing values were created to determine if they are MCAR, MNAR, etc.
+
+## EDA - Determine Type of Missing
+
+```{python}
+# Flag Missing Values
+df['NumberOfDependents_Status'] = df['NumberOfDependents'].isnull().map({True: 'missing', False: 'non missing'})
+df['MonthlyIncome_Status'] = df['MonthlyIncome'].isnull().map({True: 'missing', False: 'non missing'})
+
+# Isolate just Training data for EDA
+df_eda = df[df['DataType']=='Train']
+
+# Compare means for binary variable
+df_eda.loc[df_eda['NumberOfDependents_Status'] == 'missing', 'SeriousDlqin2yrs'].mean()
+df_eda.loc[df_eda['NumberOfDependents_Status'] == 'non missing', 'SeriousDlqin2yrs'].mean()
+
+# Graph with Medians
+for col in df_eda.columns:
+  if col != 'Id' and col!= 'MonthlyIncome' and col!= 'MonthlyIncome_Status' and \
+     col!= 'NumberOfDependents' and col!= 'NumberOfDependents_Status' and\
+     col!= 'DataType':
+
+    sns.boxplot(x='NumberOfDependents_Status', y=col, data=df_eda.dropna())
+    df_missing = df_eda[df_eda['NumberOfDependents_Status'] == 'missing']
+    df_nonmissing = df_eda[df_eda['NumberOfDependents_Status'] == 'non missing']
+    plt.title(col + ' Non Missing Mean: '+df_nonmissing[col].median().round().astype('str') \
+              +', Missing Mean: '+ df_missing[col].median().round().astype('str'))
+    plt.show()
+    plt.cla()
+
+    sns.boxplot(x='MonthlyIncome_Status', y=col, data=df_eda)
+    df_missing = df_eda[df_eda['MonthlyIncome_Status'] == 'missing']
+    df_nonmissing = df_eda[df_eda['MonthlyIncome_Status'] == 'non missing']
+    plt.title(col + ': Non Missing Mean: '+df_nonmissing[col].median().round(1).astype('str') \
+              +', Missing Mean: '+ df_missing[col].median().round(1).astype('str'))
+    plt.show()
+    plt.cla()
+```
+
+***Note:*** Quarto is not rendering both categories for some of these graphs, but they render fine in the IDE. If there were more time this bug would be investigated more.
+
+## Discussion - EDA Missing Data
+
+Two columns with missing values were found: **MonthlyIncome_Status** and **NumberOfDependents_Status**. Medians, means, and distributions for those missing values were created to determine if they are MCAR, MNAR, etc.
+
+Looking at box plot distributions and medians, it seems that the missing columns are MCAR (Missing Completely At Random) as far as can be observed without further business knowledge.
+
+Given that is the case, it is appropriate to impute missing values using linear method from scikit-learn. Decision tree would also be a valid imputation method to be explored with more time.
+
+## Impute Missing Values
+
+```{python}
+
+# Impute Missing Values
+df_do_impute = df[df['DataType']=='Train']
+df_dont_impute = df[df['DataType']=='Unseen']
+df_imputed = df_do_impute.interpolate(method='linear')
+df = pd.concat([df_do_impute, df_dont_impute])
+```
+
+```{python}
+# Count Nulls
+df_do_impute.isnull().sum()
+```
+
+## XG Boost - First Model
+
+```{python}
+
+# Isolate Train and Unseen datasets
+df_train = df[df['DataType']=='Train']
+df_unseen = df[df['DataType']=='Unseen']
+
+# Declare which columns to use from prediction
+## Exclude Id and flag columns made for EDA
+predictor_cols = ['RevolvingUtilizationOfUnsecuredLines', 'Age',\
+       'NumberOfTime30To59DaysPastDueNotWorse', 'DebtRatio', 'MonthlyIncome',\
+       'NumberOfOpenCreditLinesAndLoans', 'NumberOfTimes90DaysLate',\
+       'NumberRealEstateLoansOrLines', 'NumberOfTime60To89DaysPastDueNotWorse',\
+       'NumberOfDependents']
+       
+# Isolate X and y train and test data
+X_train, X_test, y_train, y_test = train_test_split(df_train[predictor_cols], \
+                                                    df_train[['SeriousDlqin2yrs']], \
+                                                    test_size=0.2)
+# Create model instance
+xgbst = XGBClassifier(n_estimators=100, max_depth=8, objective='binary:logistic')
+
+# Fit model
+xgbst.fit(X_train, y_train)
+
+# Make predictions
+preds = xgbst.predict(X_test)
+
+# Scoring
+df_scoring = y_test.copy(deep=True)
+df_scoring['preds']=preds
+score_all = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+df_scoring = df_scoring[df_scoring['SeriousDlqin2yrs']==1]
+score_true = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+```
+
+```{python}
+
+print('Score on all data was: '+str(100*score_all.round(2))+'% '+\
+      'Score on true data was: '+str(round(100*score_true,1))+'% ')
+```
+
+## Discussion - First XG Boost Model
+
+High accuracy rate but low accuracy on positive category of target variable indicates unbalanced data.
+
+```{python}
+
+# Check if balanced data
+train_balance = y_train[y_train['SeriousDlqin2yrs']==1].shape[0] / y_train.shape[0]
+print('True to False Balance in Training Was: '+str(100*round(train_balance,3))+'% ')
+```
+
+## Discussion - Unbalanced Data
+
+Data is not balanced meaning the majority target class is present in many more samples than the minority class, so will re-sample to make it balanced.
+
+Will use 80% of true observations for training, and twice that number of false observations.
+
+## XG Boost - Balanced
+
+```{python}
+# Isolate Train and Unseen datasets
+df_train = df[df['DataType']=='Train']
+df_unseen = df[df['DataType']=='Unseen']
+
+# Resample for balancing
+df_train_true = df_train[df_train['SeriousDlqin2yrs']==1]
+df_train_false = df_train[df_train['SeriousDlqin2yrs']==0]
+
+df_train_true_keep = df_train_true.sample(frac=0.8, random_state=42)
+df_train_true_return = df_train_true.drop(df_train_true_keep.index)
+
+df_train_false_keep = df_train_false.sample(frac=2*df_train_true_keep.shape[0]/ \
+                                               df_train_false.shape[0], \
+                                               random_state=42)
+df_train_false_return = df_train_false.drop(df_train_false_keep.index)
+
+df_train = pd.concat([df_train_true_keep, df_train_false_keep])
+
+# Isolate X and y train and test data
+X_train, X_test, y_train, y_test = train_test_split(df_train[predictor_cols], \
+                                                    df_train[['SeriousDlqin2yrs']], \
+                                                    test_size=0.2)
+                                                    
+```
+
+```{python}
+
+# Check if data is balanced
+train_balance = y_train[y_train['SeriousDlqin2yrs']==1].shape[0] / y_train.shape[0]
+print('True to False Balance in Training Is: '+str(100*round(train_balance,3))+'% ')
+```
+
+```{python}
+
+# Set up model instance
+xgbst = XGBClassifier(n_estimators=100, # Range: [50, 100, 200, 300, 500]
+                    max_depth=8,  # Range: [3, 5, 7, 9]
+                    learning_rate=0.1,  # Range: [0.01, 0.1, 0.2, 0.3, 0.5]
+                    gamma=0.01,  # Range: [0, 0.01, 0.1, 0.5, 1.0]
+                    subsample=1,  # Range: [0.6, 0.7, 0.8, 0.9, 1.0]
+                    objective='binary:logistic')
+                    
+# Fit model
+xgbst.fit(X_train, y_train)
+
+# Make predictions
+preds = xgbst.predict(X_test)
+
+# Scoring
+df_scoring = y_test.copy(deep=True)
+df_scoring['preds']=preds
+score_all = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+df_scoring = df_scoring[df_scoring['SeriousDlqin2yrs']==1]
+score_true = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+```
+
+```{python}
+
+print('Score on all data was: '+str(100*score_all.round(2))+'% '+\
+      'Score on true data was: '+str(100*score_true.round(2))+'% ')
+```
+
+### Hyperparameters Tuning
+
+Hyperparameters were all tweaked and only slight gains were found
+
+## Discussion
+
+With balanced data, as anticipated, our total misclassification rate dropped, but our correct classification of the minority class improved significantly from \~20% to \~63%
+
+## ROC
+
+```{python}
+
+# Get probabilities predicted of True (instead of just 1 or 0)
+predicted_probabilities = xgbst.predict_proba(X_test)[:, 1]
+
+# Define function to create ROC graph
+def buildROC(target_test,test_preds,model_name, color_abbreviation):
+    fpr, tpr, threshold = metrics.roc_curve(target_test, test_preds)
+    roc_auc = metrics.auc(fpr, tpr)
+    plt.title('Receiver Operating Characteristic')
+    plt.plot(fpr, tpr, color_abbreviation, label = model_name+' = %0.2f' % roc_auc)
+    plt.legend(loc = 'lower right')
+    plt.plot([0, 1], [0, 1],'r--')
+    plt.ylabel('True Positive Rate')
+    plt.xlabel('False Positive Rate')
+    plt.show()
+    plt.gcf().savefig('roc.png')
+
+# Run function to create ROC graph
+buildROC(y_test,predicted_probabilities, 'XG Boost', 'b')
+```
+
+## Discussion
+
+Can use this curve with business knowledge to determine best cutoff threshold for *True* **SeriousDlqin2yrs**. Other than 50% by weighing the expense of false flags versus the need to catch every true positive.
+
+We can also use this curve to compare various types of predictive models.
+
+## MLP Neural Network
+
+```{python}
+
+# Scale X data for MLP NN
+sc_X = StandardScaler()
+X_trainscaled=sc_X.fit_transform(X_train)
+X_testscaled=sc_X.transform(X_test)
+
+# Set up and train MLP NN
+mlpnn = MLPRegressor(hidden_layer_sizes=(64,64),
+                   activation="tanh", # ['relu', 'tanh', 'logistic']
+                   alpha=0.0001,
+                   solver="adam",  #['adam', 'sgd', 'lbfgs']
+                   batch_size=32,  #[32, 64, 128, 256]
+                   max_iter=200).fit(X_trainscaled, y_train['SeriousDlqin2yrs'])
+
+# Get probabilities predicted of True (instead of just 1 or 0)
+predicted_probabilities = mlpnn.predict(X_testscaled)
+
+# Run function to create ROC graph
+buildROC(y_test,predicted_probabilities, 'MLP NN' ,'g')
+
+# Predict y, transform to 1/0 instead of probability
+preds = mlpnn.predict(X_testscaled)
+preds = np.where(preds > 0.5, 1, 0)
+```
+
+```{python}
+
+# Scoring
+df_scoring = y_test.copy(deep=True)
+df_scoring['preds']=preds
+score_all = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+df_scoring = df_scoring[df_scoring['SeriousDlqin2yrs']==1]
+score_true = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+print('Score on all data was: '+str(100*score_all.round(2))+'% '+\
+      'Score on true data was: '+str((100*score_true).round())+'% ')
+
+```
+
+### Hyperparameters Tuning
+
+Hyperparameters were all tweaked and no gains were found. Even using alpha and early stopping parameters for regularization were not able to reduce overfitting inherent in MLP NN. Also different numbers of hidden layers were used, without gains past two hidden layers.
+
+## Discussion
+
+MLP NN was also run with the unbalanced data with results worse than the XGBoost model with unbalanced data.
+
+Compare ROC curve shows that XGBoost is the superior model slightly, but at this point XGBoost will be the current champion due to it having much better explanability/interpretability than MLP NN as well as being faster to train.
+
+If there was more time more, perhaps auto-encoder could be incorporated into model to improve prediction, as well as other advanced models using Tensor flow instead of scikit-learn.
+
+## Multiple Logistic Regression
+
+```{python}
+
+# Create and train model
+logreg = LogisticRegression(max_iter=1000)
+logreg.fit(X_train, y_train['SeriousDlqin2yrs'])
+
+# Predict as probability
+y_pred = logreg.predict_proba(X_test)[:,1]
+```
+
+```{python}
+
+# Run function to create ROC graph
+buildROC(y_test,y_pred, 'LR' ,'c')
+
+# Predict as 1/0 
+preds = logreg.predict(X_test)
+```
+
+```{python}
+
+# Scoring
+df_scoring = y_test.copy(deep=True)
+df_scoring['preds']=preds
+score_all = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+df_scoring = df_scoring[df_scoring['SeriousDlqin2yrs']==1]
+score_true = (df_scoring['preds'] == df_scoring['SeriousDlqin2yrs']).sum()/df_scoring.shape[0]
+print('Score on all data was: '+str(100*score_all.round(2))+'% '+\
+      'Score on true data was: '+str((100*score_true).round(1))+'% ')
+```
+
+### Hyperparameters Tuning
+
+No Hyperparameters to tune for regression.
+
+## Discussion
+
+If there was more time, it would be good to transform predictors to normal distribution which could improve its score.
+
+However, since ROC is so far below MLP NN and XG Boost and since it was the only model with less than 50% accuracy on True data, it's unlikely that it would improve enough to beat the other models.
+
+Also with more time, and if business knowledge required it, predictors could be tested for the assumptions of regression. Also, we could remove poor predictors or those with multicollinearity, however if prediction is the only priority for the business, there is no need to do those steps.
+
+Testing with different values of random seed, still shows that XGBoost is the superior model slightly so it will remain the champion.
+
+## Predict on Unseen Data Using Champion Model (XG Boost)
+
+```{python}
+
+# Predict from XG Boost model on unseen data
+xgb_pred = xgbst.predict_proba(df_unseen[predictor_cols])[:,1]
+df_unseen['Probability'] = xgb_pred
+```
+
+```{python}
+
+# Export to CSV
+selected_columns = df_unseen[['Id', 'Probability']]
+
+# Save the selected columns to a CSV file
+selected_columns.to_csv('Result.csv', index=False)
+```
+
+```{python}
+
+unseen_data_true_rate=df_unseen[df_unseen['SeriousDlqin2yrs'] == 1].shape[0]/df_unseen.shape[0]
+print('Rate of Serious Delinquincy in 2 Years in Unseen Data was: '+ \
+      str(int(1000*unseen_data_true_rate)/10)+'% ')
+```
+
+## Feature Importance
+
+```{python}
+
+# Clear Plot
+plt.cla()
+
+# Get Indexes of most important features
+sorted_idx = xgbst.feature_importances_.argsort()
+
+# Sort Features
+# names = predictor_cols
+# order = sorted_idx
+
+# Pair each name with its corresponding order using zip
+name_order_pairs = zip(predictor_cols, sorted_idx)
+
+# Sort the pairs based on the order
+sorted_pairs = sorted(name_order_pairs, key=lambda x: x[1])
+
+# Extract the names from the sorted pairs
+sorted_names = [name for name, _ in sorted_pairs]
+
+# Plot sorted feature importance
+plt.barh(sorted_names, xgbst.feature_importances_[sorted_idx])
+plt.xlabel("Xgboost Feature Importance")
+plt.tight_layout()
+```
+
+```{python}
+
+plt.show()
+
+```
+
+## Application to Business
+
+Given that our model is only 81% accurate on all data, and only 63% of actual True's were correctly predicted at 50% cutoff, this is not entirely suitable for something like automatically detecting fraudulent credit card charges or evaluating applications for loans without human interaction.
+
+It could, however, be used potentially with a high threshold (i.e. only rejecting very dubious applications), if the business plan is in a growth stage (meaning that snowballing business expansion is more valuable than losses to delinquency). Or a low threshold could be used in a stable business plan where losses to delinquency should be minimized above gaining new clients.
+
+It is recommended to invest more in data to make the credit decisions. Looking at the feature importance graph, data related to the highest important features could be sought, whereas data related to the lowest importance features could not be.
+
+For example, more details about the Revolving Utilization Of Unsecured Lines, Number Of Times 90 Days Late, and Number Of Open Credit Lines And Loans, could be acquired, like how recent these events are, what companies they are associated with and what type of lines or loans they are.
+
+Also potentially more information about the dependents could be acquired such as their ages, and whether or not the household has two working parents or not.
+
+Also other simple demographic details like gender, education, graduation date, occupation, etc. could be useful for prediction as well.
