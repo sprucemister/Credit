@@ -135,12 +135,12 @@ Given that is the case, it is appropriate to impute missing values using linear 
 df_do_impute = df[df['DataType']=='Train']
 df_dont_impute = df[df['DataType']=='Unseen']
 df_imputed = df_do_impute.interpolate(method='linear')
-df = pd.concat([df_do_impute, df_dont_impute])
+df = pd.concat([df_imputed, df_dont_impute])
 ```
 
 ```{python}
 # Count Nulls
-df_do_impute.isnull().sum()
+df_imputed.isnull().sum()
 ```
 
 ## XG Boost - First Model
